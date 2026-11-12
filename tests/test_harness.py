@@ -54,6 +54,7 @@ class ScriptedLLM:
         self.replies, self.prompts = list(replies), []
 
     def complete(self, system, user):
+        self.system = system
         self.prompts.append(user)
         item = self.replies.pop(0)
         if isinstance(item, Exception):
@@ -138,7 +139,7 @@ def test_full_loop(tmp_path, dataset):
         reply("experiment", CONSTANT, "a constant predictor", "ablation"),
         "I think we should try something else.",         # unusable reply
         reply("stop"),
-    ], max_iters=10, patience=5)
+    ], max_iters=10, patience=5, reference={"gradient boosting": 0.99, "logreg": 0.6})
     researcher.cfg.llm_retries = 3
     import harness.agent as agent_mod
     agent_mod.time.sleep = lambda s: None  # skip the retry backoff
@@ -153,6 +154,11 @@ def test_full_loop(tmp_path, dataset):
     assert by_iter[3]["status"] == "rejected_screen"
     assert state.incumbent["iter"] == 2 and "HistGradient" in state.incumbent_code
     assert state.incumbent["val_mean"] > 0.85
+
+    # The researcher was told the bar and, each turn, how far the incumbent is from it.
+    assert "gradient boosting: 0.9900 validation accuracy" in llm.system
+    assert "this turn must be a probe" in llm.prompts[0]
+    assert "below the bar" in llm.prompts[1] and "must be a probe" not in llm.prompts[1]
 
     # The repair turn carried the traceback; no prompt ever carried a test score.
     assert any("undefined_name" in p and "NameError" in p for p in llm.prompts)
@@ -169,8 +175,22 @@ def test_full_loop(tmp_path, dataset):
     assert (researcher.cfg.run_dir / "progress.png").stat().st_size > 5000
 
 
+def test_first_turn_must_be_a_probe(tmp_path, dataset):
+    researcher, llm = make(tmp_path, dataset, [
+        reply("experiment", GBM),      # sent back
+        reply("experiment", GBM),      # sent back again
+        reply("experiment", GBM),      # third time it is let through
+    ], max_iters=3)
+    researcher.run()
+    records = Journal(researcher.cfg.run_dir).records()
+    assert [r["type"] for r in records[1:4]] == ["invalid_reply", "invalid_reply", "experiment"]
+    assert "before any data probe" in records[1]["error"]
+    assert "must be a probe" in llm.prompts[1] and "must be a probe" not in llm.prompts[2]
+
+
 def test_resume_keeps_incumbent(tmp_path, dataset):
-    first, _ = make(tmp_path, dataset, [reply("experiment", GBM)], max_iters=1)
+    first, _ = make(tmp_path, dataset, [reply("experiment", GBM)], max_iters=1,
+                    require_probe=False)
     assert "max_iters" in first.run()
     second, llm = make(tmp_path, dataset, [reply("experiment", CONSTANT)], max_iters=2)
     second.run()

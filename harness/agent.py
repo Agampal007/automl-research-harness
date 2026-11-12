@@ -26,6 +26,9 @@ class Config:
     min_delta: float = 0.0005  # smallest mean gain worth accepting
     max_hours: float = 8.0
     llm_retries: int = 6
+    # Validation accuracy of each reference model, shown to the researcher as the bar.
+    reference: dict[str, float] | None = None
+    require_probe: bool = True  # the first turn of a new run must inspect the data
 
 
 class Researcher:
@@ -33,8 +36,9 @@ class Researcher:
         self.cfg, self.llm, self.echo = cfg, llm, echo
         self.journal = Journal(cfg.run_dir)
         self.meta = load_meta(cfg.data_dir)
-        self.system = prompts.system_prompt(profile(cfg.data_dir), cfg.budget_s)
+        self.system = prompts.system_prompt(profile(cfg.data_dir), cfg.budget_s, cfg.reference)
         self.tokens = [0, 0]
+        self.probe_refusals = 0
 
     # -- model calls ---------------------------------------------------------
 
@@ -191,8 +195,12 @@ class Researcher:
             it = state.iteration + 1
             self.echo(f"\n[{it}/{cfg.max_iters}] incumbent val {state.incumbent['val_mean']:.5f} "
                       f"| {state.since_improvement}/{cfg.patience} since last gain")
+            # A new run starts by looking at the data. If the model insists on an
+            # experiment twice, let it through rather than stall the run.
+            probe_first = (cfg.require_probe and not state.probes and not state.experiments
+                           and self.probe_refusals < 2)
             try:
-                reply = self._ask(prompts.user_prompt(state, cfg))
+                reply = self._ask(prompts.user_prompt(state, cfg, probe_first))
                 try:
                     proposal = prompts.parse_reply(reply.text)
                 except prompts.ParseError as e:
@@ -206,7 +214,13 @@ class Researcher:
                 if proposal.action == "stop":
                     reason = f"researcher chose to stop: {proposal.rationale}"
                     break
-                if proposal.action == "probe":
+                if probe_first and proposal.action == "experiment":
+                    self.probe_refusals += 1
+                    self.echo("  sent back: the first turn must be a probe")
+                    self.journal.append({"type": "invalid_reply", "iter": it,
+                                         "error": "experiment proposed before any data probe",
+                                         "reply_head": proposal.hypothesis[:500]})
+                elif proposal.action == "probe":
                     self._probe(it, proposal)
                 else:
                     self._experiment(it, proposal, state)

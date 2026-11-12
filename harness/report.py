@@ -24,7 +24,14 @@ def _steps(records: list[dict]) -> list[dict]:
             or (r.get("type") == "experiment" and r["status"] == "accepted")]
 
 
-def plot(records: list[dict], out: Path, title: str) -> None:
+def _references(baselines_file: Path | None) -> dict:
+    if not baselines_file or not baselines_file.exists():
+        return {}
+    return {k: v for k, v in json.loads(baselines_file.read_text()).items()
+            if not k.startswith("_")}
+
+
+def plot(records: list[dict], out: Path, title: str, bar: tuple[str, float] | None = None) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -35,7 +42,7 @@ def plot(records: list[dict], out: Path, title: str) -> None:
     last_iter = max([r.get("iter", 0) for r in records] + [1])
     floor = steps[0]["val_mean"]
     top = max([s["val_mean"] for s in steps] + [s["hidden"]["test_mean"] for s in steps]
-              + [r["val"][0] for r in exps])
+              + [r["val"][0] for r in exps] + ([bar[1]] if bar else []))
     lo = min(floor, steps[0]["hidden"]["test_mean"])
     pad = max((top - lo) * 0.25, 0.002)
     y0, y1 = lo - pad, top + pad
@@ -49,6 +56,13 @@ def plot(records: list[dict], out: Path, title: str) -> None:
     ax.scatter([r["iter"] for r in shown], [r["val"][0] for r in shown], s=26, color=MUTED,
                alpha=0.75, linewidths=0, label="Discarded experiment (first seed)", zorder=2)
     below = len(rejected) - len(shown)
+
+    if bar:  # the reference the researcher was asked to beat: context, so neutral ink
+        # Stops at the last iteration so it never runs under the end labels.
+        ax.plot([-0.5, last_iter], [bar[1]] * 2, color=MUTED, linewidth=1.2,
+                linestyle=(0, (4, 3)), zorder=1)
+        ax.annotate(f"{bar[0]} reference, validation: {bar[1]:.4f}", (0, bar[1]), xytext=(2, 4),
+                    textcoords="offset points", fontsize=8.5, color="#52514e")
 
     xs = [s["iter"] for s in steps] + [last_iter]
     val_on_top = steps[-1]["val_mean"] >= steps[-1]["hidden"]["test_mean"]
@@ -101,7 +115,11 @@ def build(run_dir: Path, baselines_file: Path | None = None) -> Path:
     status = Counter(r["status"] for r in exps)
     repaired = sum(1 for r in exps if r.get("repairs") and r["status"] != "failed")
 
-    plot(records, run_dir / "progress.png", f"Research run: {run_dir.name}")
+    refs = _references(baselines_file)
+    others = {k: mean(v["val"]) for k, v in refs.items() if mean(v["val"]) > first["val_mean"]}
+    best = max(others, key=others.get) if others else None
+    plot(records, run_dir / "progress.png", f"Research run: {run_dir.name}",
+         (best.replace("_ref", ""), others[best]) if best else None)
 
     L = [f"# Run report: {run_dir.name}", ""]
     if stops:
@@ -120,10 +138,10 @@ def build(run_dir: Path, baselines_file: Path | None = None) -> Path:
         "validation column; the test column measures how much of the gain is real.",
         "",
     ]
-    if baselines_file and baselines_file.exists():
+    if refs:
         L += ["## Reference models (same splits, same runner)", "",
               "| Model | Validation | Test | Fit time |", "|---|---|---|---|"]
-        for name, b in json.loads(baselines_file.read_text()).items():
+        for name, b in refs.items():
             L.append(f"| {name} | {_pm(b['val'])} | {_pm(b['test'])} | {b['seconds']:.0f}s |")
         L.append("")
     L += [

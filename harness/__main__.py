@@ -34,6 +34,10 @@ def main(argv=None) -> None:
     s.add_argument("--patience", type=int, default=8)
     s.add_argument("--budget", type=float, default=60.0, help="training seconds per run")
     s.add_argument("--max-hours", type=float, default=8.0)
+    s.add_argument("--baselines", type=Path, default=ROOT / "runs" / "baselines.json",
+                   help="reference scores; their validation numbers are shown to the researcher")
+    s.add_argument("--no-probe", action="store_true",
+                   help="do not require a data probe on the first turn")
 
     s = sub.add_parser("report", help="write report.md and progress.png for a run")
     s.add_argument("--run-dir", type=Path, required=True)
@@ -54,7 +58,8 @@ def main(argv=None) -> None:
         from . import sandbox, scoring
         from .data import load_meta
 
-        meta, results = load_meta(a.data_dir), {}
+        meta = load_meta(a.data_dir)
+        results = {"_dataset": meta["name"]}  # so a run never borrows another dataset's bar
         for path in sorted((ROOT / "baselines").glob("*.py")):
             val, test, secs = [], [], []
             for seed in (0, 1, 2):
@@ -77,13 +82,29 @@ def main(argv=None) -> None:
         from .agent import Config, Researcher
         from .llm import make_llm
 
+        from statistics import mean
+
+        from .data import load_meta
+
+        # The bar the researcher is shown: validation scores of the reference models,
+        # minus the seed solution itself. Test scores stay in the file.
+        reference = None
+        if a.baselines.exists():
+            scored = json.loads(a.baselines.read_text())
+            if scored.get("_dataset") == load_meta(a.data_dir)["name"]:
+                reference = {k.replace("_ref", "").replace("_", " "): mean(v["val"])
+                             for k, v in scored.items()
+                             if not k.startswith("_") and k != a.seed_solution.stem}
         cfg = Config(data_dir=a.data_dir, run_dir=a.run_dir, seed_solution=a.seed_solution,
                      max_iters=a.max_iters, patience=a.patience, budget_s=a.budget,
-                     max_hours=a.max_hours)
+                     max_hours=a.max_hours, reference=reference or None,
+                     require_probe=not a.no_probe)
         llm = make_llm(a.backend, a.model, a.base_url)
         print(f"Researcher: {llm.name}  |  run dir: {a.run_dir}")
+        if reference:
+            print(f"Bar to beat: {max(reference.values()):.5f} validation accuracy")
         Researcher(cfg, llm, echo=lambda m: print(m, flush=True)).run()
-        print(f"Report: {report.build(a.run_dir, ROOT / 'runs' / 'baselines.json')}")
+        print(f"Report: {report.build(a.run_dir, a.baselines)}")
 
     elif a.cmd == "report":
         from . import report

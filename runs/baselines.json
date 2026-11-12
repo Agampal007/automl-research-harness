@@ -1,4 +1,5 @@
 {
+  "_dataset": "covertype",
   "lightgbm_ref": {
     "val": [
       0.9706030842665687,

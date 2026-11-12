@@ -49,6 +49,7 @@ more seeds and becomes the new incumbent only if its mean gain is larger than \
 the seed-to-seed noise. Everything else is discarded and the incumbent stays. A \
 separate test split is scored silently for the final report, so tuning to \
 validation noise will show up there.
+{reference}
 
 # What makes a good experiment
 Change one idea at a time relative to the incumbent, so the result tells you \
@@ -77,8 +78,33 @@ experiments will not produce a real gain, and say why in the rationale.
 """
 
 
-def system_prompt(profile: str, budget_s: float) -> str:
-    return SYSTEM.format(profile=profile, budget=budget_s, kinds=" | ".join(KINDS))
+REFERENCE = """
+# The bar
+{rows}
+These were scored on the same validation split through the same harness. The \
+strongest one is the number to beat: a result below it is not yet interesting, \
+however much it improves on the incumbent. They are other people's fixed \
+configurations, not a ceiling."""
+
+
+def system_prompt(profile: str, budget_s: float, reference: dict[str, float] | None = None) -> str:
+    """`reference` maps a short description of each reference model to its
+    validation accuracy. Only validation numbers belong here."""
+    ref = ""
+    if reference:
+        rows = "\n".join(f"- {name}: {score:.4f} validation accuracy"
+                         for name, score in sorted(reference.items(), key=lambda kv: kv[1]))
+        ref = REFERENCE.format(rows=rows)
+    return SYSTEM.format(profile=profile, budget=budget_s, kinds=" | ".join(KINDS), reference=ref)
+
+
+PROBE_FIRST = (
+    "# First step\nYou have not looked at the data yet, so this turn must be a probe, not an "
+    "experiment. The profile above only has per-feature summaries. Use the probe to learn "
+    "something that will change what you try: for example how separable the classes are and "
+    "on which features, where the rare classes sit, or how features interact. Print compact "
+    "numbers, not raw rows."
+)
 
 
 def curve_summary(curve: list[dict], points: int = 8) -> str:
@@ -102,7 +128,7 @@ def _outcome(rec: dict) -> str:
     }[rec["status"]]
 
 
-def user_prompt(state, cfg) -> str:
+def user_prompt(state, cfg, probe_first: bool = False) -> str:
     """The per-iteration turn. Only validation numbers appear here; test scores
     are stored under the `hidden` key of each record and are never read."""
     inc = state.incumbent
@@ -132,15 +158,22 @@ def user_prompt(state, cfg) -> str:
         parts.append("\n".join(detail))
     else:
         parts.append("# Experiment log\nNo experiments yet. The incumbent is the starting baseline.")
-    for p in state.probes[-2:]:
+    # The first probe shaped the whole run, so it stays visible next to the latest ones.
+    for p in {p["iter"]: p for p in state.probes[:1] + state.probes[-2:]}.values():
         parts.append(
             f"# Probe output (iteration {p['iter']}): {p['hypothesis']}\n{p['output'][:4000]}"
         )
-    parts.append(
+    budget = (
         f"# Budget\nThis is iteration {state.iteration + 1} of at most {cfg.max_iters}. "
         f"Experiments since the last accepted improvement: {state.since_improvement} "
-        f"(the run stops at {cfg.patience}).\n\nPropose the next step."
+        f"(the run stops at {cfg.patience})."
     )
+    if cfg.reference:
+        gap = max(cfg.reference.values()) - inc["val_mean"]
+        budget += (f" The incumbent is {gap:.4f} below the bar." if gap > 0
+                   else f" The incumbent is {-gap:.4f} above the bar.")
+    parts.append(budget)
+    parts.append(PROBE_FIRST if probe_first else "Propose the next step.")
     return "\n\n".join(parts)
 
 

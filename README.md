@@ -56,9 +56,64 @@ What happened, read straight from the journal:
   `harness/llm.py`, and the same run directory was then resumed from its
   journal, which is why the iteration numbers continue from 10.
 
-The seed solution scores slightly differently in the two tables (0.9145 in the
-run, 0.9081 in the reference table). Training is cut off by wall-clock time, so
-the same seed does not complete the same number of steps twice.
+The seed solution scores slightly differently each time it is run (0.9145 in
+this run, 0.9081 in the reference table, 0.9292 in the run below). Training is
+cut off by wall-clock time, so the same seed does not complete the same number
+of steps twice.
+
+## A second run, after changing what the researcher is told
+
+The first run exposed two gaps in the loop rather than in the model: the
+researcher was never told what a good score looks like, and nothing made it
+look at the data. Two changes followed:
+
+- **A bar.** The validation scores of the reference models go into the prompt,
+  and every turn states how far the incumbent is from the strongest one. Test
+  scores stay in the file.
+- **Probe first.** The first turn of a new run must be a data probe. An
+  experiment proposed before any probe is sent back, twice at most, so a model
+  that will not comply cannot stall the run.
+
+Same model, same budget, fresh run directory:
+[`runs/qwen-covertype-v2`](runs/qwen-covertype-v2)
+([report](runs/qwen-covertype-v2/report.md)).
+
+![progress](runs/qwen-covertype-v2/progress.png)
+
+| | Run 1 | Run 2 (bar + probe first) |
+|---|---|---|
+| Final validation accuracy | 0.9662 | 0.9687 ± 0.0005 |
+| Final test accuracy (hidden) | 0.9649 | 0.9680 ± 0.0003 |
+| Gap to LightGBM on test (0.9702) | 0.0053 | 0.0022 |
+| Experiments (accepted) | 20 (8) | 21 (6) |
+| Data probes | 0 | 1 |
+| Kinds of accepted step | model swap, then hyperparameters | features, architecture, optimisation |
+| Iterations lost to unusable replies | 6 | 2 |
+
+- **The research looks different.** The probe printed per-class feature
+  statistics, and the first experiment used them: elevation × wilderness and
+  elevation × soil interaction features, justified by what the probe showed.
+  From there the model kept the neural network and improved it (wider layers,
+  residual blocks, a lower peak learning rate) where run 1 dropped it at once.
+- **It read its own training curves.** Iteration 15 found a bug in the
+  incumbent's learning-rate schedule, a cosine that ran past π and climbed
+  again, from the dip it caused in the logged hold-out accuracy. Fixing it was
+  worth +0.0027.
+- **It tested the obvious alternative and the gate rejected it.** Iterations 7
+  and 8 tried gradient boosting and a boosting + MLP ensemble, naming the
+  0.9709 bar as the reason. Both scored below the incumbent and were discarded.
+- **The confirmation step earned its place again.** Iteration 22 scored 0.9696
+  on the first seed, the best single number of the run, then 0.9533 on the
+  second. It was rejected.
+- **It still did not beat the reference.** It ended 0.0022 short on test,
+  against 0.0053 in run 1, then stopped after eight
+  experiments without a gain.
+
+This is one run per condition, with a starting point that itself moves between
+runs, so the table shows a change in behaviour and not a measured effect size.
+The difference in final accuracy is small enough to be run-to-run variation.
+What is not noise is the content of the journal: the first run contains no
+probe and no feature engineering, and the second contains both.
 
 ## How the loop works
 
@@ -84,9 +139,10 @@ the same seed does not complete the same number of steps twice.
                           new incumbent ──────────────────────────────────────────►┘
 ```
 
-Each turn the model sees the incumbent's code, a one-line-per-experiment log of
-everything tried so far, the loss curve and output of its last experiment, and
-any data probes it ran. It replies with a hypothesis, a category
+Each turn the model sees the incumbent's code, the reference scores it is
+trying to beat, a one-line-per-experiment log of everything tried so far, the
+loss curve and output of its last experiment, and the data probes it ran. A new
+run opens with a mandatory probe. It replies with a hypothesis, a category
 (architecture, loss, features, optimization, regularization, ablation, hparam)
 and one Python file. The run ends after `--patience` experiments without an
 accepted gain, at `--max-iters`, at `--max-hours`, or when the model itself
@@ -157,7 +213,9 @@ python -m harness run --run-dir runs/claude --backend anthropic
 ```
 
 Useful flags: `--max-iters 30`, `--patience 8`, `--budget 60` (training seconds
-per run), `--max-hours 8`. `python -m harness report --run-dir runs/qwen`
+per run), `--max-hours 8`, `--baselines FILE` (reference scores to show the
+researcher; ignored if they were measured on a different dataset) and
+`--no-probe` (drop the probe-first rule). `python -m harness report --run-dir runs/qwen`
 rebuilds the report at any time, including while a run is in progress.
 
 A run directory contains `journal.jsonl`, every file the model wrote under
@@ -206,4 +264,5 @@ pytest
 The end-to-end test drives the real loop with a scripted model on a small
 synthetic dataset: a probe, a transient backend error, a crashing experiment
 that gets repaired and accepted, a regression that gets discarded, an unusable
-reply, then stop and resume.
+reply, then stop and resume. A separate test covers the probe-first rule,
+including the case where the model refuses it.
